@@ -249,7 +249,8 @@ const SEED_DATA = JSON.parse("[{\"id\": 1, \"containerID\": \"\", \"description\
 const CONTAINERS = ['AUTO-1','Bag','BIG B1','BIG E1','BIG E2','Big B2','black bucket tool bag','BOX 1','BOX 2','BOX 3','DOCS-MANUALS','DOCS-MEDIA','DOCS-PERSONAL','E1','E2','E3','E4','E5','E6','ELEC-LIGHTING','ELEC-SUPPLY','ELEC-TESTERS','ELEC-TOOLS-1','ELEC-TOOLS-2','electrical bag','emergency box','ENTERTAIN-1','FASTENERS','Freezer Storage','garage attic','garage floor','garage wall','H1','hall','HAND-TOOLS-1','HAND-TOOLS-2','HAND-TOOLS-3','HARDWARE-1','HARDWARE-2','HOME-APPAREL','HOME-HEALTH','HOME-SEASONAL','HOME-SUPPLIES','HVAC-1','KIDS-1','kitchen','Klein bag','living room','LOW-VOLT-1','low voltage bag','MATERIALS-1','mbox1','mbox2','mbox3','MISC-1','MISC-2','MT1','orange bucket tool bag','OUTDOOR-1','OUTDOOR-POWER','PLUMB-SUPPLY','PLUMB-TOOLS','plumbers bag','P1','REPAIR-1','S1','S10','S11','S12','S13','S14','S15','S16','S17','S18','S2','S3','S4','S5','S6','S7','S8','S9','SBOX1','SBOX2','SBOX3','SBOX4','SBOX5','SBOX6','SBOX7','SBOX8','SS11','SS12','SS13','SS14','SS15','SS16','TECH-AV','TECH-CABLES','TECH-CELL','TECH-COMPUTE','TECH-MISC','TECH-NETWORK','U1'];
 const CATEGORIES = ['Abby','Appliance','Auto','Battery','Bicycle','Cell Accessories','Cell Phone','Cleaner','Clothing','Computer','Document','Electrical','Electrical Tester','Electrical Tools','Electronic Accessories','Emergency','Entertainment','Garden','Generator','Hand Tool','Hardware','Health','Home','Hvac','Lighting','Low Voltage Tool','Manual','Material','Medicine','Misc','Network','Office','Outdoor','Personal Care','Personal Digital Storage','Plumbing','Repair','Safety','Screws Nails Staples','Seasonal','Soap And Shampoo','Tape','Television','Tools','Tv Accesories'];
 const AREAS = ['GARAGE','HOUSE','GARAGE ATTIC'];
-const STORAGE_KEY = 'garage-inv-v3';
+const FIREBASE_URL = 'https://garage-inventory-cebcb-default-rtdb.firebaseio.com';
+const FIREBASE_PATH = '/inventory.json';
 const EMPTY_FORM = {containerID:'',description:'',category:'',area:'',brand:'',modelNum:'',estValue:'',qty:'1',notes:''};
 
 // ── State ──────────────────────────────────────────────────────────────────
@@ -270,27 +271,83 @@ let state = {
   pdfCatSelected: new Set(),
   dragOver: false,
   ready: false,
+  syncing: false,
+  syncError: false,
 };
 let toastTimer = null;
 let searchTimer = null;
+let saveTimer = null;
 
-function loadStored() {
+// ── Firebase functions ─────────────────────────────────────────────────────
+async function loadFromFirebase() {
   try {
-    const s = localStorage.getItem(STORAGE_KEY);
-    if (s) return JSON.parse(s);
-  } catch(e) {}
-  return null;
+    const res = await fetch(FIREBASE_URL + FIREBASE_PATH);
+    if (!res.ok) throw new Error('Load failed');
+    const data = await res.json();
+    if (data && Array.isArray(data) && data.length > 0) return data;
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      const arr = Object.values(data);
+      if (arr.length > 0) return arr;
+    }
+    return null;
+  } catch(e) {
+    console.error('Firebase load error:', e);
+    return null;
+  }
 }
+
+async function saveToFirebase(items) {
+  state.syncing = true;
+  state.syncError = false;
+  try {
+    const res = await fetch(FIREBASE_URL + FIREBASE_PATH, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(items)
+    });
+    if (!res.ok) throw new Error('Save failed');
+    state.syncing = false;
+    state.syncError = false;
+  } catch(e) {
+    console.error('Firebase save error:', e);
+    state.syncing = false;
+    state.syncError = true;
+    showToast('⚠️ Sync error — check connection', 'err');
+  }
+  render();
+}
+
 function saveStored(items) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(items)); } catch(e) {}
+  // Debounce saves — wait 1.5s after last change before writing to Firebase
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => saveToFirebase(items), 1500);
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
-(function init() {
-  const stored = loadStored();
-  state.items = (stored && stored.length) ? stored : SEED_DATA.map((d,i) => ({...d, id: i+1}));
-  state.ready = true;
+(async function init() {
+  // Show loading state
+  state.ready = false;
   render();
+
+  // Try Firebase first
+  const firebaseData = await loadFromFirebase();
+
+  if (firebaseData && firebaseData.length > 0) {
+    // Firebase has data — use it
+    state.items = firebaseData;
+    state.ready = true;
+    render();
+  } else {
+    // Firebase is empty — seed it with our built-in data
+    const seedItems = SEED_DATA.map((d,i) => ({...d, id: i+1}));
+    state.items = seedItems;
+    state.ready = true;
+    render();
+    // Write seed data to Firebase so it persists
+    showToast('First run — saving data to cloud...');
+    await saveToFirebase(seedItems);
+    showToast('✅ Data saved to cloud permanently');
+  }
 })();
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -306,6 +363,9 @@ function matchesItem(item, q) {
 function commit(newItems) {
   state.items = newItems;
   saveStored(newItems);
+  // Update sync indicator
+  state.syncing = true;
+  render();
 }
 
 function subtractQty(id) {
@@ -698,8 +758,15 @@ function editItem(id) {
 }
 
 function render() {
-  const {items, tab, searchQ, fContainer, fCategory, removeQ, removeSelected,
-    selected, sortF, sortD, form, editId, confirmDel, toast, showImport, dragOver, showPdfPicker, pdfSelected, pdfCatSelected} = state;
+  if (!state.ready) {
+    document.getElementById('app').innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:80vh;gap:16px;">
+      <div style="font-size:40px;">☁️</div>
+      <div style="font-family:'DM Mono',monospace;font-size:12px;letter-spacing:3px;color:#1A5C38;">LOADING FROM CLOUD...</div>
+      <div style="font-family:'DM Sans',sans-serif;font-size:13px;color:#8a909e;">Connecting to Firebase</div>
+    </div>`;
+    return;
+  }
 
   const usedContainers = [...new Set(items.map(i => i.containerID).filter(Boolean))].sort();
   const usedCategories = [...new Set(items.map(i => i.category).filter(Boolean))].sort();
@@ -720,6 +787,9 @@ function render() {
     <div class="hdr-chips">
       <div class="chip"><b>${items.length}</b> items</div>
       <div class="chip"><b>${usedContainers.length}</b> containers</div>
+      <div class="chip" style="border-color:${state.syncError?'#C0392B':state.syncing?'#e6a817':'#1A5C38'};color:${state.syncError?'#C0392B':state.syncing?'#e6a817':'#1A5C38'};">
+        ${state.syncError?'⚠️ Sync error':state.syncing?'⟳ Saving...':'☁️ Saved'}
+      </div>
     </div>
     <div class="hdr-right">
       <button class="btn-hdr" onclick="state.showImport=!state.showImport;render()">Import</button>
@@ -835,7 +905,7 @@ function render() {
     html += `
     <div class="stats-row">
       <div class="stat"><div class="stat-val">${items.length}</div><div class="stat-lbl">Total Items</div></div>
-      <div class="stat"><div class="stat-val">${sortedItems.length}</div><div class="stat-lbl">Showing</div></div>
+      <div class="stat"><div class="stat-val">${items.reduce((s,i)=>s+(parseInt(i.qty)||1),0).toLocaleString()}</div><div class="stat-lbl">Total Qty</div></div>
       <div class="stat"><div class="stat-val">${usedContainers.length}</div><div class="stat-lbl">Containers</div></div>
       <div class="stat"><div class="stat-val">$${Math.round(totalValue).toLocaleString()}</div><div class="stat-lbl">Est. Value</div></div>
     </div>
@@ -890,7 +960,13 @@ function render() {
           <td><span class="badge-cat">${esc(item.category)||'—'}</span></td>
           <td class="td-muted">${esc(item.area)||'—'}</td>
           <td class="td-muted">${esc(item.brand)||'—'}</td>
-          <td class="td-mono">${item.qty||1}</td>
+          <td>
+            <div style="display:flex;align-items:center;gap:3px;font-family:'DM Mono',monospace;font-size:13px;">
+              <button onclick="(function(){const idx=state.items.findIndex(x=>x.id===${item.id});if(idx>-1){const c=parseInt(state.items[idx].qty)||1;if(c>1){state.items[idx].qty=String(c-1);saveStored(state.items);}else{state.confirmDel=${item.id};}render();})();event.stopPropagation();" style="width:22px;height:22px;border:1px solid var(--bd);background:var(--bg3);border-radius:3px;cursor:pointer;font-size:14px;line-height:1;color:var(--err);padding:0;display:flex;align-items:center;justify-content:center;">−</button>
+              <span id="qty-${item.id}" style="min-width:22px;text-align:center;color:${(parseInt(item.qty)||1)>1?'var(--acc)':'var(--tx2)'};">${item.qty||1}</span>
+              <button onclick="(function(){const idx=state.items.findIndex(x=>x.id===${item.id});if(idx>-1){state.items[idx].qty=String((parseInt(state.items[idx].qty)||1)+1);saveStored(state.items);render();}})();event.stopPropagation();" style="width:22px;height:22px;border:1px solid var(--bd);background:var(--bg3);border-radius:3px;cursor:pointer;font-size:14px;line-height:1;color:var(--acc);padding:0;display:flex;align-items:center;justify-content:center;">+</button>
+            </div>
+          </td>
           <td class="td-mono">${item.estValue?'$'+parseFloat(item.estValue).toFixed(2):'—'}</td>
           <td>
             <div class="row-acts">
