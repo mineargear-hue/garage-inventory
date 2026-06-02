@@ -325,29 +325,27 @@ function saveStored(items) {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 (async function init() {
-  // Show loading state
   state.ready = false;
   render();
 
-  // Try Firebase first
-  const firebaseData = await loadFromFirebase();
+  try {
+    const firebaseData = await loadFromFirebase();
 
-  if (firebaseData && firebaseData.length > 0) {
-    // Firebase has data — use it
-    state.items = firebaseData;
-    state.ready = true;
-    render();
-  } else {
-    // Firebase is empty — seed it with our built-in data
-    const seedItems = SEED_DATA.map((d,i) => ({...d, id: i+1}));
-    state.items = seedItems;
-    state.ready = true;
-    render();
-    // Write seed data to Firebase so it persists
-    showToast('First run — saving data to cloud...');
-    await saveToFirebase(seedItems);
-    showToast('✅ Data saved to cloud permanently');
+    if (firebaseData && firebaseData.length > 0) {
+      state.items = firebaseData;
+    } else {
+      // Firebase is empty — use seed data and write it up
+      state.items = SEED_DATA.map((d,i) => ({...d, id: i+1}));
+      // Write to Firebase in background — don't wait
+      saveToFirebase(state.items);
+    }
+  } catch(e) {
+    // If Firebase fails entirely, fall back to seed data
+    state.items = SEED_DATA.map((d,i) => ({...d, id: i+1}));
   }
+
+  state.ready = true;
+  render();
 })();
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -767,6 +765,8 @@ function render() {
     </div>`;
     return;
   }
+  const {items, tab, searchQ, fContainer, fCategory, removeQ, removeSelected,
+    selected, sortF, sortD, form, editId, confirmDel, toast, showImport, dragOver, showPdfPicker, pdfSelected, pdfCatSelected} = state;
 
   const usedContainers = [...new Set(items.map(i => i.containerID).filter(Boolean))].sort();
   const usedCategories = [...new Set(items.map(i => i.category).filter(Boolean))].sort();
